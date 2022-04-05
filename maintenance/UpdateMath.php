@@ -45,8 +45,6 @@ class UpdateMath extends Maintenance {
 	private $chunkSize = 1000;
 
 	public function __construct() {
-        $_SERVER['REMOTE_ADDR'] = 'docker.host.internal';
-
         parent::__construct();
 		$this->addDescription( 'Updates the index of Mathematical formulae.' );
 		$this->addOption( 'purge',
@@ -65,7 +63,7 @@ class UpdateMath extends Maintenance {
 		$this->addOption( 'mode', 'Rendering mode to be used (png, mathml, latexml)', false, true,
 			'm' );
 		$this->addOption( 'chunk-size',
-			'Determinesm how many pages are updated in one database transaction.', false, true );
+			'Determines how many pages are updated in one database transaction.', false, true );
 		$this->requireExtension( 'MathSearch' );
 	}
 
