@@ -45,7 +45,9 @@ class UpdateMath extends Maintenance {
 	private $chunkSize = 1000;
 
 	public function __construct() {
-		parent::__construct();
+        $_SERVER['REMOTE_ADDR'] = 'docker.host.internal';
+
+        parent::__construct();
 		$this->addDescription( 'Updates the index of Mathematical formulae.' );
 		$this->addOption( 'purge',
 			"If set all formulae are rendered again without using caches. (Very time consuming!)",
@@ -63,7 +65,7 @@ class UpdateMath extends Maintenance {
 		$this->addOption( 'mode', 'Rendering mode to be used (png, mathml, latexml)', false, true,
 			'm' );
 		$this->addOption( 'chunk-size',
-			'Determines how many pages are updated in one database transaction.', false, true );
+			'Determinesm how many pages are updated in one database transaction.', false, true );
 		$this->requireExtension( 'MathSearch' );
 	}
 
@@ -129,7 +131,12 @@ class UpdateMath extends Maintenance {
 			// echo "before" +$this->dbw->selectField('mathindex', 'count(*)')."\n";
 			foreach ( $res as $s ) {
 				$this->output( "\nr{$s->rev_id}" );
-				$fCount += $this->doUpdate( $s->page_id, $s->old_text, $s->page_title, $s->rev_id );
+                echo"\n Page: {$s->page_title} with  namespace: {$s->page_namespace}";
+                # Only index pages from main and project namespace atm:
+                # https://www.mediawiki.org/wiki/Help:Namespaces
+                if($s->page_namespace=="4" or $s->page_namespace=="0" ){
+                    $fCount += $this->doUpdate( $s->page_id, $s->old_text, $s->page_title, $s->rev_id );
+                }
 			}
 			// echo "before" +$this->dbw->selectField('mathindex', 'count(*)')."\n";
 			$start = microtime( true );
