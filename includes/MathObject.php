@@ -163,14 +163,14 @@ class MathObject extends MathMathML {
 		}
 	}
 
-	/**
-	 * @param string $wikiText
-	 * @return array
-	 */
-	public static function extractMathTagsFromWikiText( $wikiText ): array {
-		$idGenerator = new MathIdGenerator( $wikiText );
-		return $idGenerator->getMathTags();
-	}
+        /**
+         * @param string $wikiText
+         * @return array
+         */
+        public static function extractMathTagsFromWikiText( $wikiText ): object {
+                $idGenerator = new MathIdGenerator( $wikiText );
+                return $idGenerator;
+        }
 
 	public static function updateStatistics() {
 		$dbw = wfGetDB( DB_MASTER );

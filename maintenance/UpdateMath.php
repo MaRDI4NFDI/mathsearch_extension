@@ -25,221 +25,242 @@ require_once __DIR__ . '/../../../maintenance/Maintenance.php';
 
 class UpdateMath extends Maintenance {
 
-	/** @var bool */
-	private $purge = false;
-	/** @var bool */
-	private $verbose;
-	/** @var \Wikimedia\Rdbms\IDatabase */
-	private $dbw;
-	/** @var \Wikimedia\Rdbms\IDatabase */
-	private $db;
-	/** @var MathRenderer */
-	private $current;
-	/** @var float */
-	private $time = 0.0; // microtime( true );
-	/** @var float[] */
-	private $performance = [];
-	/** @var string */
-	private $renderingMode = 'latexml';
-	/** @var int */
-	private $chunkSize = 1000;
+        /** @var bool */
+        private $purge = false;
+        /** @var bool */
+        private $verbose;
+        /** @var \Wikimedia\Rdbms\IDatabase */
+        private $dbw;
+        /** @var \Wikimedia\Rdbms\IDatabase */
+        private $db;
+        /** @var MathRenderer */
+        private $current;
+        /** @var float */
+        private $time = 0.0; // microtime( true );
+        /** @var float[] */
+        private $performance = [];
+        /** @var string */
+        private $renderingMode = 'latexml';
+        /** @var int */
+        private $chunkSize = 1000;
 
-	public function __construct() {
+        public function __construct() {
         parent::__construct();
-		$this->addDescription( 'Updates the index of Mathematical formulae.' );
-		$this->addOption( 'purge',
-			"If set all formulae are rendered again without using caches. (Very time consuming!)",
-			false, false, "f" );
-		$this->addArg( 'min', "If set processing is started at the page with rank(pageID)>min",
-			false );
-		$this->addArg( 'max', "If set processing is stopped at the page with rank(pageID)<=max",
-			false );
-		$this->addOption( 'verbose', "If set output for successful rendering will produced", false,
-			false, 'v' );
-		$this->addOption( 'SVG', "If set SVG images will be produced", false, false );
-		$this->addOption( 'hooks', "If set hooks will be skipped, but index will be updated.",
-			false, false );
-		$this->addOption( 'texvccheck', "If set texvccheck will be skipped", false, false );
-		$this->addOption( 'mode', 'Rendering mode to be used (png, mathml, latexml)', false, true,
-			'm' );
-		$this->addOption( 'chunk-size',
-			'Determines how many pages are updated in one database transaction.', false, true );
-		$this->requireExtension( 'MathSearch' );
-	}
+                $this->addDescription( 'Updates the index of Mathematical formulae.' );
+                $this->addOption( 'purge',
+                        "If set all formulae are rendered again without using caches. (Very time consuming!)",
+                        false, false, "f" );
+                $this->addArg( 'min', "If set processing is started at the page with rank(pageID)>min",
+                        false );
+                $this->addArg( 'max', "If set processing is stopped at the page with rank(pageID)<=max",
+                        false );
+                $this->addOption( 'verbose', "If set output for successful rendering will produced", false,
+                        false, 'v' );
+                $this->addOption( 'SVG', "If set SVG images will be produced", false, false );
+                $this->addOption( 'hooks', "If set hooks will be skipped, but index will be updated.",
+                        false, false );
+                $this->addOption( 'texvccheck', "If set texvccheck will be skipped", false, false );
+                $this->addOption( 'mode', 'Rendering mode to be used (png, mathml, latexml)', false, true,
+                        'm' );
+                $this->addOption( 'chunk-size',
+                        'Determines how many pages are updated in one database transaction.', false, true );
+                $this->requireExtension( 'MathSearch' );
+        }
 
-	/**
-	 * Measures time in ms.
-	 * In order to have a formula centric evaluation, we can not just the build in profiler
-	 * @param string $category
-	 *
-	 * @return int
-	 */
-	private function time( $category = 'default' ) {
-		global $wgMathDebug;
-		$delta = ( microtime( true ) - $this->time ) * 1000;
-		if ( isset( $this->performance[$category] ) ) {
-			$this->performance[$category] += $delta;
-		} else {
-			$this->performance[$category] = $delta;
-		}
-		if ( $wgMathDebug ) {
-			$this->db->insert( 'mathperformance', [
-				'math_inputhash' => $this->current->getInputHash(),
-				'mathperformance_name' => substr( $category, 0, 10 ),
-				'mathperformance_time' => $delta,
-				'mathperformance_mode' => $this->renderingMode
-			] );
-		}
-		$this->time = microtime( true );
-
-		return (int)$delta;
-	}
-
-	/**
-	 * Populates the search index with content from all pages
-	 *
-	 * @param int $n
-	 * @param int $cMax
-	 */
-	protected function populateSearchIndex( $n = 0, $cMax = -1 ) {
-		$res = $this->db->select( 'revision', 'MAX(rev_id) AS count' );
-		$s = $this->db->fetchObject( $res );
-		$count = $s->count;
-		if ( $cMax > 0 && $count > $cMax ) {
-			$count = $cMax;
-		}
-		$this->output(
-			"Rebuilding index fields for pages with revision < {$count} with option {$this->purge}...\n"
-		);
-		$fCount = 0;
-		// return;
-		while ( $n < $count ) {
-			if ( $n ) {
-				$this->output( $n . " of $count \n" );
-			}
-			$end = min( $n + $this->chunkSize - 1, $count );
-
-			$res = $this->db->select( [ 'page', 'revision', 'text' ],
-					[ 'page_id', 'page_namespace', 'page_title', 'old_flags', 'old_text', 'rev_id' ],
-					[ "rev_id BETWEEN $n AND $end", 'page_latest = rev_id' ],
-					__METHOD__
-			);
-			$this->dbw->begin( __METHOD__ );
-			$revisionStore = MediaWikiServices::getInstance()->getRevisionStore();
-			// echo "before" +$this->dbw->selectField('mathindex', 'count(*)')."\n";
-			foreach ( $res as $s ) {
-				$this->output( "\nr{$s->rev_id}" );
-                echo"\n Page: {$s->page_title} with  namespace: {$s->page_namespace}";
-                # Only index pages from main and project namespace atm:
-                # https://www.mediawiki.org/wiki/Help:Namespaces
-                if($s->page_namespace=="4" or $s->page_namespace=="0" ){
-                    $fCount += $this->doUpdate( $s->page_id, $s->old_text, $s->page_title, $s->rev_id );
+        /**
+         * Measures time in ms.
+         * In order to have a formula centric evaluation, we can not just the build in profiler
+         * @param string $category
+         *
+         * @return int
+         */
+        private function time( $category = 'default' ) {
+                global $wgMathDebug;
+                $delta = ( microtime( true ) - $this->time ) * 1000;
+                if ( isset( $this->performance[$category] ) ) {
+                        $this->performance[$category] += $delta;
+                } else {
+                        $this->performance[$category] = $delta;
                 }
-			}
-			// echo "before" +$this->dbw->selectField('mathindex', 'count(*)')."\n";
-			$start = microtime( true );
-			$this->dbw->commit( __METHOD__ );
-			echo " committed in " . ( microtime( true ) - $start ) . "s\n\n";
-			var_dump( $this->performance );
-			// echo "after" +$this->dbw->selectField('mathindex', 'count(*)')."\n";
-			$n += $this->chunkSize;
-		}
-		$this->output( "Updated {$fCount} formulae!\n" );
-	}
+                if ( $wgMathDebug ) {
+                        $this->db->insert( 'mathperformance', [
+                                'math_inputhash' => $this->current->getInputHash(),
+                                'mathperformance_name' => substr( $category, 0, 10 ),
+                                'mathperformance_time' => $delta,
+                                'mathperformance_mode' => $this->renderingMode
+                        ] );
+                }
+                $this->time = microtime( true );
 
-	/**
-	 * @param int $pid
-	 * @param string $pText
-	 * @param string $pTitle
-	 * @param int $revId
-	 *
-	 * @return number
-	 */
-	private function doUpdate( $pid, $pText, $pTitle = "", $revId = 0 ) {
-		$notused = '';
-		$parser = new Parser();
-		$parser->mLinkID = 0;
-		$parser->mRevisionId = $revId;
-		// MathSearchHooks::setNextID($eId);
-		$math = MathObject::extractMathTagsFromWikiText( $pText );
-		$matches = count( $math );
-		if ( $matches ) {
-			echo ( "\t processing $matches math fields for {$pTitle} page\n" );
-			foreach ( $math as $formula ) {
-				$this->time = microtime( true );
-				$renderer = MathRenderer::getRenderer( $formula[1], $formula[2], $this->renderingMode );
-				$this->current = $renderer;
-				$this->time( "loadClass" );
-				if ( $this->getOption( "texvccheck", false ) ) {
-					$checked = true;
-				} else {
-					$checked = $renderer->checkTeX();
-					$this->time( "checkTex" );
-				}
-				if ( $checked ) {
-					if ( !$renderer->isInDatabase() || $this->purge ) {
-						$renderer->render( $this->purge );
-						if ( $renderer->getMathml() ) {
-							$this->time( "render" );
-						} else {
-							$this->time( "Failing" );
-						}
-						if ( $this->getOption( "SVG", false ) ) {
-							$svg = $renderer->getSvg();
-							if ( $svg ) {
-								$this->time( "SVG-Rendering" );
-							} else {
-								$this->time( "SVG-Fail" );
-							}
-						}
-					} else {
-						$this->time( 'checkInDB' );
-					}
-				} else {
-					$this->time( "checkTex-Fail" );
-					echo "\nF:\t\t" . $renderer->getMd5() . " texvccheck error:" . $renderer->getLastError();
-					continue;
-				}
-				$renderer->writeCache();
-				$this->time( "write Cache" );
-				if ( !$this->getOption( "hooks", false ) ) {
-					Hooks::run( 'MathFormulaPostRender', [ $parser, &$renderer, &$notused ] );
-					$this->time( "hooks" );
-				} else {
-					$eId = null;
-					MathSearchHooks::setMathId( $eId, $renderer, $revId );
-					MathSearchHooks::writeMathIndex( $revId, $eId, $renderer->getInputHash(), '' );
-					$this->time( "index" );
-				}
-				if ( $renderer->getLastError() ) {
-					echo "\n\t\t" . $renderer->getLastError();
-					echo "\nF:\t\t" . $renderer->getMd5() . " equation " . ( $eId ) .
-						"-failed beginning with\n\t\t'" . substr( $formula[3], 0, 100 )
-						. "'\n\t\tmathml:" . substr( $renderer->getMathml(), 0, 10 ) . "\n ";
-				} else {
-					if ( $this->verbose ) {
-						echo "\nS:\t\t" . $renderer->getMd5();
-					}
-				}
-			}
-			return $matches;
-		}
-		return 0;
-	}
+                return (int)$delta;
+        }
 
-	public function execute() {
-		global $wgMathValidModes;
-		$this->dbw = wfGetDB( DB_MASTER );
-		$this->purge = $this->getOption( "purge", false );
-		$this->verbose = $this->getOption( "verbose", false );
-		$this->renderingMode = $this->getOption( "mode", 'latexml' );
-		$this->chunkSize = $this->getOption( 'chunk-size', $this->chunkSize );
-		$this->db = wfGetDB( DB_MASTER );
-		$wgMathValidModes[] = $this->renderingMode;
-		$this->output( "Loaded.\n" );
-		$this->time = microtime( true );
-		$this->populateSearchIndex( $this->getArg( 0, 0 ), $this->getArg( 1, -1 ) );
-	}
+        /**
+         * Populates the search index with content from all pages
+         *
+         * @param int $n
+         * @param int $cMax
+         */
+        protected function populateSearchIndex( $n = 0, $cMax = -1 ) {
+                $res = $this->db->select( 'revision', 'MAX(rev_id) AS count' );
+                $s = $this->db->fetchObject( $res );
+                $count = $s->count;
+                if ( $cMax > 0 && $count > $cMax ) {
+                        $count = $cMax;
+                }
+                $this->output(
+                        "Rebuilding index fields for pages with revision < {$count} with option {$this->purge}...\n"
+                );
+                $fCount = 0;
+                // return;
+                while ( $n < $count ) {
+                        if ( $n ) {
+                                $this->output( $n . " of $count \n" );
+                        }
+                        $end = min( $n + $this->chunkSize - 1, $count );
+
+                        $res = $this->db->select( [ 'page', 'revision', 'text' ],
+                                        [ 'page_id', 'page_namespace', 'page_title', 'old_flags', 'old_text', 'rev_id' ],
+                                        [ "page_namespace BETWEEN 4 AND 4","rev_id BETWEEN $n AND $end", 'page_latest = rev_id' ],
+                                        __METHOD__
+                        );
+                        $this->dbw->begin( __METHOD__ );
+                        $revisionStore = MediaWikiServices::getInstance()->getRevisionStore();
+                        // echo "before" +$this->dbw->selectField('mathindex', 'count(*)')."\n";
+                        foreach ( $res as $s ) {
+                                if ($s->page_title != "MathSearchTest"){
+                                        continue;
+                                }
+                                $this->output( "\nr{$s->rev_id}" );                
+                                # Only index pages from main and project namespace atm:
+                                # https://www.mediawiki.org/wiki/Help:Namespaces
+                                 if($s->page_namespace=="4"){
+                                         echo"\n Page: {$s->page_title} with  namespace: {$s->page_namespace}";
+                                         $fCount += $this->doUpdate( $s->page_id, $s->old_text, $s->page_title, $s->rev_id );
+                                 }
+                                echo "\n fCount = {$fCount}/1";
+                                if($fCount>=1){
+
+                                        break;
+                                }
+                        }
+                        // echo "before" +$this->dbw->selectField('mathindex', 'count(*)')."\n";
+                        $start = microtime( true );
+                        $this->dbw->commit( __METHOD__ );
+                        echo " committed in " . ( microtime( true ) - $start ) . "s\n\n";
+                        var_dump( $this->performance );
+                        // echo "after" +$this->dbw->selectField('mathindex', 'count(*)')."\n";
+                        $n += $this->chunkSize;
+                }
+                $this->output( "Updated {$fCount} formulae!\n" );
+        }
+
+        /**
+         * @param int $pid
+         * @param string $pText
+         * @param string $pTitle
+         * @param int $revId
+         *
+         * @return number
+         */
+        private function doUpdate( $pid, $pText, $pTitle = "", $revId = 0 ) {
+                $notused = '';
+                # pText=":<math>pi * r^2</math>";
+                $parser = new Parser();
+
+                $parser->mLinkID = 0;
+                $parser->mRevisionId = $revId;
+                // MathSearchHooks::setNextID($eId);
+                $idGenerator = MathObject::extractMathTagsFromWikiText( $pText );
+                $math = $idGenerator->getMathTags();
+                $matches = count( $math );
+                if ( $matches ) {
+                        $ctr=0;
+                        echo ("\t processing $matches math fields for {$pTitle} page\n" );
+                        # echo ("\n text for page: {$pText}");
+                        foreach ( $math as $formula ) {
+                                $ctr+=1;
+                                $this->time = microtime( true );
+                                $renderer = MathRenderer::getRenderer( $formula[1], $formula[2], $this->renderingMode );
+                                $this->current = $renderer;
+                                $this->time( "loadClass" );
+                                if ( $this->getOption( "texvccheck", false ) ) {
+                                        $checked = true;
+                                } else {
+                                        $checked = $renderer->checkTeX();
+                                        $this->time( "checkTex" );
+                                }
+                                if ( $checked ) {
+                                        if ( !$renderer->isInDatabase() || $this->purge ) {
+                                                $renderer->render( $this->purge );
+                                                if ( $renderer->getMathml() ) {
+                                                        $this->time( "render" );
+                                                } else {
+                                                        $this->time( "Failing" );
+                                                }
+                                                if ( $this->getOption( "SVG", false ) ) {
+                                                        $svg = $renderer->getSvg();
+                                                        if ( $svg ) {
+                                                                $this->time( "SVG-Rendering" );
+                                                        } else {
+                                                                $this->time( "SVG-Fail" );
+                                                        }
+                                                }
+                                        } else {
+                                                $this->time( 'checkInDB' );
+                                        }
+                                } else {
+                                        $this->time( "checkTex-Fail" );
+                                        echo "\nF:\t\t" . $renderer->getMd5() . " texvccheck error:" . $renderer->getLastError();
+                                        continue;
+                                }
+                                echo "Renderer {$renderer->getMathml()}";
+                                $renderer->writeCache();
+                                $this->time( "write Cache" );
+                                if ( false) {
+                                        Hooks::run( 'MathFormulaPostRender', [ $parser, &$renderer, &$notused ] );
+                                        $this->time( "hooks" );
+                                } else {
+                                        echo "\nwriting mathindex with revId={$revId}";
+                                        #$eId = $idGenerator->guessIdFromContent( $renderer->getUserInputTex() );
+                                        # MathSearchHooks::setMathId( $eId, $renderer, $revId );
+                                        #if($eId==null){
+                                        #    echo("\nmathindex: continuing becauise eId null");
+                                        #    continue;
+                                        #}#
+                                        $eId = "math"+$ctr;
+                                        MathSearchHooks::writeMathIndex( $revId, $eId, $renderer->getInputHash(), '' );
+                                        $this->time( "index" );
+                                }
+                                if ( $renderer->getLastError() ) {
+                                        echo "\n\t\t" . $renderer->getLastError();
+                                        echo "\nF:\t\t" . $renderer->getMd5() . " equation " . ( $eId ) .
+                                                "-failed beginning with\n\t\t'" . substr( $formula[3], 0, 100 )
+                                                . "'\n\t\tmathml:" . substr( $renderer->getMathml(), 0, 10 ) . "\n ";
+                                } else {
+                                        if ( $this->verbose ) {
+                                                echo "\nS:\t\t" . $renderer->getMd5();
+                                        }
+                                }
+                        }
+                        return $matches;
+                }
+                return 0;
+        }
+
+        public function execute() {
+                global $wgMathValidModes;
+                $this->dbw = wfGetDB( DB_MASTER );
+                $this->purge = $this->getOption( "purge", false );
+                $this->verbose = $this->getOption( "verbose", false );
+                $this->renderingMode = $this->getOption( "mode", 'latexml' );
+                $this->chunkSize = $this->getOption( 'chunk-size', $this->chunkSize );
+                $this->db = wfGetDB( DB_MASTER );
+                $wgMathValidModes[] = $this->renderingMode;
+                $this->output( "Loaded.\n" );
+                $this->time = microtime( true );
+                $this->populateSearchIndex( $this->getArg( 0, 0 ), $this->getArg( 1, -1 ) );
+        }
 }
 
 $maintClass = UpdateMath::class;
